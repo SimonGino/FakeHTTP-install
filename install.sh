@@ -15,7 +15,7 @@ SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
 LOG_FILE="${INSTALL_DIR}/fakehttp.log"
 
 # 网络配置
-INTERFACE="eno1"
+INTERFACE="eno1-ovs"
 TTL="5"
 HOSTS=("www.speedtest.net" "speed.nuaa.edu.cn")
 
@@ -171,25 +171,44 @@ test_proxy() {
     fi
 }
 
-# 选择下载方式
-choose_download_method() {
-    info "检测网络环境..."
+# 简单的网络连接测试
+test_network_connectivity() {
+    local test_sites=("github.com" "api.github.com")
+    local results=()
     
-    # 检查是否能直接访问GitHub
-    if curl -s --connect-timeout 5 https://api.github.com &> /dev/null; then
-        success "直连 GitHub 正常"
-        DOWNLOAD_METHOD="direct"
-        info "使用直连下载"
-        return 0
+    info "测试网络连接状态..."
+    
+    for site in "${test_sites[@]}"; do
+        if curl -s --connect-timeout 3 --max-time 5 "https://$site" &> /dev/null; then
+            results+=("$site: ✓ 可达")
+        else
+            results+=("$site: ✗ 不可达")
+        fi
+    done
+    
+    for result in "${results[@]}"; do
+        echo "  $result"
+    done
+    
+    # 测试镜像代理
+    if curl -s --connect-timeout 5 --max-time 8 "${GITHUB_PROXY}https://github.com" &> /dev/null; then
+        echo "  镜像代理: ✓ 可用"
     else
-        warn "直连 GitHub 失败，需要选择下载方式"
+        echo "  镜像代理: ✗ 不可用"
     fi
     
     echo
+}
+
+# 选择下载方式
+choose_download_method() {
+    # 显示网络连接状态
+    test_network_connectivity
+    
     highlight "请选择下载方式："
-    echo "1. 直接下载 (可能失败)"
-    echo "2. 使用 HTTP 代理下载"
-    echo "3. 使用 GitHub 镜像代理下载 (推荐)"
+    echo "1. 直接下载 (从 GitHub 直接下载)"
+    echo "2. 代理下载 (使用 HTTP 代理)"
+    echo "3. 加速下载 (使用 GitHub 镜像代理)"
     echo "4. 退出安装"
     echo
     
@@ -204,7 +223,7 @@ choose_download_method() {
                 break
                 ;;
             2)
-                info "选择 HTTP 代理下载"
+                info "选择代理下载"
                 # 测试默认代理
                 if test_proxy "$DEFAULT_PROXY"; then
                     DOWNLOAD_METHOD="http-proxy"
@@ -224,22 +243,10 @@ choose_download_method() {
                 fi
                 ;;
             3)
-                info "选择 GitHub 镜像代理下载"
+                info "选择加速下载"
                 DOWNLOAD_METHOD="github-proxy"
-                # 测试镜像代理是否可用
-                if curl -s --connect-timeout 5 "${GITHUB_PROXY}https://api.github.com" &> /dev/null; then
-                    success "GitHub 镜像代理可用"
-                    break
-                else
-                    warn "GitHub 镜像代理似乎不可用，但仍可尝试"
-                    read -p "是否继续使用镜像代理？(y/N): " -n 1 -r
-                    echo
-                    if [[ $REPLY =~ ^[Yy]$ ]]; then
-                        break
-                    else
-                        continue
-                    fi
-                fi
+                success "已选择 GitHub 镜像代理"
+                break
                 ;;
             4)
                 info "退出安装"
@@ -252,11 +259,13 @@ choose_download_method() {
         esac
     done
     
-    info "已选择下载方式: $DOWNLOAD_METHOD"
+    success "已选择下载方式: $DOWNLOAD_METHOD"
 }
 
 # 检查网络连接
 check_network() {
+    info "正在检测网络环境..."
+    
     # 检查环境变量中的代理设置
     local proxy_url=""
     if [[ -n "$HTTP_PROXY" ]]; then
@@ -269,17 +278,24 @@ check_network() {
         proxy_url="$https_proxy"
     fi
     
-    # 如果环境变量中有代理，先测试并使用
+    # 如果环境变量中有代理，询问是否使用
     if [[ -n "$proxy_url" ]]; then
-        if test_proxy "$proxy_url"; then
-            info "使用环境变量代理: $proxy_url"
-            export CURL_PROXY="$proxy_url"
-            DOWNLOAD_METHOD="http-proxy"
-            return 0
+        info "检测到环境变量代理: $proxy_url"
+        read -p "是否使用环境变量代理？(y/N): " -n 1 -r
+        echo
+        if [[ $REPLY =~ ^[Yy]$ ]]; then
+            if test_proxy "$proxy_url"; then
+                info "使用环境变量代理: $proxy_url"
+                export CURL_PROXY="$proxy_url"
+                DOWNLOAD_METHOD="http-proxy"
+                return 0
+            else
+                warn "环境变量代理测试失败，请手动选择下载方式"
+            fi
         fi
     fi
     
-    # 否则让用户选择下载方式
+    # 让用户选择下载方式
     choose_download_method
 }
 
@@ -360,50 +376,50 @@ download_fakehttp() {
     esac
     
     # 构建curl命令
-    local curl_cmd="curl -L --progress-bar --fail --connect-timeout 30"
+    local curl_cmd="curl -L --progress-bar --fail --connect-timeout 10 --max-time 300"
     if [[ "$DOWNLOAD_METHOD" == "http-proxy" && -n "$CURL_PROXY" ]]; then
         curl_cmd="$curl_cmd --proxy $CURL_PROXY"
     fi
     
     # 下载文件
     if ! $curl_cmd -o "${temp_dir}/${filename}" "$download_url"; then
-        error "下载失败"
-        rm -rf "$temp_dir"
-        
-        # 根据当前下载方式提供替代方案
-        case "$DOWNLOAD_METHOD" in
-            "direct")
-                warn "直连下载失败，是否尝试其他下载方式？"
-                ;;
-            "http-proxy")
-                warn "代理下载失败，是否尝试其他下载方式？"
-                ;;
-            "github-proxy")
-                warn "镜像代理下载失败，是否尝试其他下载方式？"
-                ;;
-        esac
+        error "下载失败: $download_url"
         
         echo
         highlight "请选择操作："
         echo "1. 重新选择下载方式"
-        echo "2. 退出安装"
+        echo "2. 使用自动重试 (最多3次)"
+        echo "3. 退出安装"
         echo
-        read -p "请选择 (1-2): " -n 1 -r
+        read -p "请选择 (1-3): " -n 1 -r
         echo
         
         case $REPLY in
             1)
+                info "重新选择下载方式..."
                 choose_download_method
                 # 重新调用下载函数
                 download_fakehttp
                 return $?
                 ;;
             2)
+                info "使用自动重试..."
+                if retry_download "$temp_dir" "$filename"; then
+                    success "重试下载成功！"
+                else
+                    error "重试下载失败"
+                    rm -rf "$temp_dir"
+                    exit 1
+                fi
+                ;;
+            3)
                 info "退出安装"
+                rm -rf "$temp_dir"
                 exit 0
                 ;;
             *)
                 error "无效选择"
+                rm -rf "$temp_dir"
                 exit 1
                 ;;
         esac
@@ -472,7 +488,7 @@ create_manager_script() {
 
 # 配置变量
 FAKEHTTP_BIN="./fakehttp"
-INTERFACE="eno1"
+INTERFACE="eno1-ovs"
 TTL="5"
 LOG_FILE="/vol2/1000/fake/fakehttp.log"
 HOSTS=("www.speedtest.net" "speed.nuaa.edu.cn")
@@ -930,11 +946,11 @@ FakeHTTP 安装和管理脚本
 
 代理设置说明:
     1. 环境变量: HTTP_PROXY, http_proxy, HTTPS_PROXY, https_proxy
-    2. 自动检测: 检测网络环境，自动决定是否使用代理
-    3. 交互选择: 提供多种下载方式选择
-       - 直接下载
-       - HTTP 代理下载 (默认: ${DEFAULT_PROXY})
-       - GitHub 镜像代理下载 (${GITHUB_PROXY})
+    2. 交互选择: 提供三种下载方式选择
+       - 直接下载: 直接从 GitHub 下载
+       - 代理下载: 使用 HTTP 代理下载 (默认: ${DEFAULT_PROXY})
+       - 加速下载: 使用 GitHub 镜像代理下载 (${GITHUB_PROXY})
+    3. 重试机制: 下载失败时可重新选择方式或自动重试
 
 示例:
     $0 install                    # 安装 FakeHTTP (交互选择下载方式)
@@ -943,9 +959,14 @@ FakeHTTP 安装和管理脚本
     $0 status                     # 查看状态
 
 下载方式说明:
-    1. 直接下载: 直接从 GitHub 下载，适合海外服务器
-    2. HTTP 代理: 通过本地代理下载，适合有代理服务的环境
-    3. GitHub 镜像: 通过 ${GITHUB_PROXY} 下载，适合国内环境
+    1. 直接下载: 直接从 GitHub 下载，适合网络良好的环境
+    2. 代理下载: 通过 HTTP 代理下载，适合有代理服务的环境
+    3. 加速下载: 通过 ${GITHUB_PROXY} 下载，适合网络受限的环境
+
+下载失败处理:
+    - 可重新选择下载方式
+    - 支持自动重试 (最多3次)
+    - 每次重试都可选择不同的下载方式
 
 安装后管理:
     systemctl start fakehttp
@@ -995,3 +1016,46 @@ main() {
 
 # 执行主函数
 main "$@"
+
+# 重试下载函数
+retry_download() {
+    local temp_dir="$1"
+    local filename="$2"
+    local max_retries=3
+    local retry_count=0
+    
+    while [ $retry_count -lt $max_retries ]; do
+        info "尝试重新下载 (第 $((retry_count + 1)) 次)..."
+        
+        # 重新选择下载方式
+        choose_download_method
+        
+        # 构建下载命令
+        local download_url=$(get_download_url)
+        local curl_cmd="curl -L --progress-bar --fail --connect-timeout 10 --max-time 300"
+        
+        if [[ "$DOWNLOAD_METHOD" == "http-proxy" && -n "$CURL_PROXY" ]]; then
+            curl_cmd="$curl_cmd --proxy $CURL_PROXY"
+        fi
+        
+        info "下载链接: $download_url"
+        info "使用方式: $DOWNLOAD_METHOD"
+        
+        # 尝试下载
+        if $curl_cmd -o "${temp_dir}/${filename}" "$download_url"; then
+            success "下载成功！"
+            return 0
+        else
+            error "下载失败 (第 $((retry_count + 1)) 次尝试)"
+            ((retry_count++))
+            
+            if [ $retry_count -lt $max_retries ]; then
+                warn "将在 3 秒后重试..."
+                sleep 3
+            fi
+        fi
+    done
+    
+    error "已达到最大重试次数 ($max_retries)，下载失败"
+    return 1
+}
