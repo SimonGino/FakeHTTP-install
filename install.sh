@@ -63,154 +63,53 @@ HOSTS=("www.speedtest.net" "speed.nuaa.edu.cn")
 # 网络接口检测函数
 detect_network_interfaces() {
     info "检测网络接口..."
-    
+
     # 获取所有网络接口信息
     local interfaces=()
     local interface_info=()
-    
+
     # 使用 ip 命令获取接口信息
     while IFS= read -r line; do
         if [[ "$line" =~ ^[0-9]+:\ ([^:]+): ]]; then
             local iface="${BASH_REMATCH[1]}"
-            # 排除回环接口
-            if [[ "$iface" != "lo" ]]; then
-                interfaces+=("$iface")
-                
-                # 获取接口详细信息
+            # 排除回环接口和明显不符合的接口
+            if [[ "$iface" != "lo" && ! "$iface" =~ ^(veth|docker0|br-[a-f0-9]+)$ ]]; then
                 local ip_info=$(ip addr show "$iface" 2>/dev/null | grep -E "inet [0-9]" | head -1 | awk '{print $2}' | cut -d'/' -f1)
                 local state=$(ip link show "$iface" 2>/dev/null | grep -o "state [A-Z]*" | cut -d' ' -f2)
-                local type="unknown"
-                
-                # 判断接口类型
-                if [[ "$iface" =~ ^(eth|eno|enp|ens) ]]; then
-                    type="ethernet"
-                elif [[ "$iface" =~ ^(wlan|wlp|wlo) ]]; then
-                    type="wifi"
-                elif [[ "$iface" =~ ^(docker|br-|veth) ]]; then
-                    type="virtual"
-                elif [[ "$iface" =~ ^(tun|tap) ]]; then
-                    type="tunnel"
+
+                # 只保留有IP地址或者是UP状态的接口
+                if [[ -n "$ip_info" || "$state" == "UP" ]]; then
+                    interfaces+=("$iface")
+                    interface_info+=("$iface|$ip_info|$state")
                 fi
-                
-                # 存储接口信息
-                interface_info+=("$iface|$ip_info|$state|$type")
             fi
         fi
     done < <(ip link show 2>/dev/null)
-    
-    # 如果没有找到接口，尝试备用方法
-    if [ ${#interfaces[@]} -eq 0 ]; then
-        warn "使用 ip 命令未找到接口，尝试备用方法..."
-        
-        # 尝试使用 ifconfig
-        if command -v ifconfig &> /dev/null; then
-            while IFS= read -r line; do
-                if [[ "$line" =~ ^([^:\ ]+): ]]; then
-                    local iface="${BASH_REMATCH[1]}"
-                    if [[ "$iface" != "lo" ]]; then
-                        interfaces+=("$iface")
-                        
-                        local ip_info=$(ifconfig "$iface" 2>/dev/null | grep -E "inet [0-9]" | head -1 | awk '{print $2}')
-                        local state="unknown"
-                        local type="unknown"
-                        
-                        if [[ "$iface" =~ ^(eth|eno|enp|ens) ]]; then
-                            type="ethernet"
-                        elif [[ "$iface" =~ ^(wlan|wlp|wlo) ]]; then
-                            type="wifi"
-                        fi
-                        
-                        interface_info+=("$iface|$ip_info|$state|$type")
-                    fi
-                fi
-            done < <(ifconfig 2>/dev/null | grep -E "^[a-zA-Z]")
-        fi
-    fi
-    
+
     # 导出接口信息供其他函数使用
     export DETECTED_INTERFACES=("${interfaces[@]}")
     export INTERFACE_INFO=("${interface_info[@]}")
 }
 
-# 智能推荐网络接口
-recommend_network_interface() {
-    local recommended=""
-    local score=0
-    local best_score=0
-    
-    info "分析网络接口..."
-    
-    for info in "${INTERFACE_INFO[@]}"; do
-        IFS='|' read -r iface ip_addr state type <<< "$info"
-        local current_score=0
-        
-        # 评分规则
-        # 1. 有IP地址 +50分
-        if [[ -n "$ip_addr" && "$ip_addr" != "" ]]; then
-            current_score=$((current_score + 50))
-        fi
-        
-        # 2. 接口状态UP +30分
-        if [[ "$state" == "UP" ]]; then
-            current_score=$((current_score + 30))
-        fi
-        
-        # 3. 接口类型优先级
-        case "$type" in
-            "ethernet")
-                current_score=$((current_score + 20))
-                ;;
-            "wifi")
-                current_score=$((current_score + 15))
-                ;;
-            "virtual")
-                current_score=$((current_score + 5))
-                ;;
-            "tunnel")
-                current_score=$((current_score + 3))
-                ;;
-        esac
-        
-        # 4. 接口名称优先级
-        if [[ "$iface" =~ ^(eth0|eno1|enp) ]]; then
-            current_score=$((current_score + 10))
-        fi
-        
-        # 选择最高分数的接口
-        if [[ $current_score -gt $best_score ]]; then
-            best_score=$current_score
-            recommended="$iface"
-        fi
-    done
-    
-    if [[ -n "$recommended" ]]; then
-        highlight "🎯 智能推荐接口：$recommended (评分: $best_score)"
-        echo "建议选择此接口作为 FakeHTTP 的网络接口"
-    else
-        warn "无法自动推荐接口，请手动选择"
-    fi
-    
-    echo
-    export RECOMMENDED_INTERFACE="$recommended"
-}
+
 
 # 显示网络接口详细信息
 show_interface_details() {
     local iface="$1"
-    
+
     for info in "${INTERFACE_INFO[@]}"; do
-        IFS='|' read -r if_name ip_addr state type <<< "$info"
+        IFS='|' read -r if_name ip_addr state <<< "$info"
         if [[ "$if_name" == "$iface" ]]; then
             echo "  接口名称: $if_name"
             echo "  IP 地址:  ${ip_addr:-未配置}"
             echo "  状态:     ${state:-未知}"
-            echo "  类型:     $type"
-            
+
+
             # 显示更多详细信息
             if command -v ip &> /dev/null; then
                 local mac=$(ip link show "$iface" 2>/dev/null | grep -o "link/ether [^ ]*" | cut -d' ' -f2)
                 local mtu=$(ip link show "$iface" 2>/dev/null | grep -o "mtu [0-9]*" | cut -d' ' -f2)
-                
+
                 if [[ -n "$mac" ]]; then
                     echo "  MAC 地址: $mac"
                 fi
@@ -218,7 +117,7 @@ show_interface_details() {
                     echo "  MTU:      $mtu"
                 fi
             fi
-            
+
             # 测试接口连通性
             if [[ -n "$ip_addr" ]]; then
                 echo "  连通性测试..."
@@ -228,7 +127,7 @@ show_interface_details() {
                     echo "  网络连通: ❌ 异常"
                 fi
             fi
-            
+
             break
         fi
     done
@@ -238,7 +137,7 @@ show_interface_details() {
 choose_network_interface() {
     # 检测网络接口
     detect_network_interfaces
-    
+
     if [ ${#DETECTED_INTERFACES[@]} -eq 0 ]; then
         error "未检测到可用的网络接口"
         warn "请检查网络配置或手动指定接口"
@@ -252,28 +151,15 @@ choose_network_interface() {
         fi
         return
     fi
-    
-    # 智能推荐
-    recommend_network_interface
-    
+
     highlight "检测到以下网络接口："
     echo
-    
+
     # 显示接口列表
     local index=1
     for info in "${INTERFACE_INFO[@]}"; do
-        IFS='|' read -r iface ip_addr state type <<< "$info"
-        
-        # 设置显示图标
-        local icon=""
-        case "$type" in
-            "ethernet") icon="🔗" ;;
-            "wifi") icon="📶" ;;
-            "virtual") icon="🐳" ;;
-            "tunnel") icon="🔒" ;;
-            *) icon="🔌" ;;
-        esac
-        
+        IFS='|' read -r iface ip_addr state <<< "$info"
+
         # 设置状态显示
         local status_display=""
         if [[ "$state" == "UP" ]]; then
@@ -281,37 +167,20 @@ choose_network_interface() {
         else
             status_display="❌ DOWN"
         fi
-        
-        # 推荐标记
-        local recommend_mark=""
-        if [[ "$iface" == "$RECOMMENDED_INTERFACE" ]]; then
-            recommend_mark=" 🌟 推荐"
-        fi
-        
-        printf "%2d. %s %-15s %s %s%s\n" "$index" "$icon" "$iface" "$status_display" "${ip_addr:-无IP}" "$recommend_mark"
+
+        printf "%2d. %-15s %s %s\n" "$index" "$iface" "$status_display" "${ip_addr:-无IP}"
         ((index++))
     done
-    
+
     echo
     echo "$(($index)). 自定义接口名称"
     echo "$(($index + 1)). 使用当前配置 ($INTERFACE)"
     echo
-    
+
     while true; do
-        if [[ -n "$RECOMMENDED_INTERFACE" ]]; then
-            read -p "请选择接口 (1-$(($index + 1))，直接回车使用推荐): " -r choice
-            if [[ -z "$choice" ]]; then
-                choice="推荐"
-            fi
-        else
-            read -p "请选择接口 (1-$(($index + 1))): " -r choice
-        fi
-        
-        if [[ "$choice" == "推荐" && -n "$RECOMMENDED_INTERFACE" ]]; then
-            INTERFACE="$RECOMMENDED_INTERFACE"
-            success "已选择推荐接口: $INTERFACE"
-            break
-        elif [[ "$choice" =~ ^[0-9]+$ ]] && [[ $choice -ge 1 && $choice -le ${#DETECTED_INTERFACES[@]} ]]; then
+        read -p "请选择接口 (1-$(($index + 1))): " -r choice
+
+        if [[ "$choice" =~ ^[0-9]+$ ]] && [[ $choice -ge 1 && $choice -le ${#DETECTED_INTERFACES[@]} ]]; then
             local selected_index=$((choice - 1))
             INTERFACE="${DETECTED_INTERFACES[$selected_index]}"
             success "已选择接口: $INTERFACE"
@@ -334,12 +203,12 @@ choose_network_interface() {
             continue
         fi
     done
-    
+
     echo
     highlight "选择的接口详细信息："
     show_interface_details "$INTERFACE"
     echo
-    
+
     # 确认选择
     read -p "确认使用此接口吗？(Y/n): " -n 1 -r
     echo
@@ -359,11 +228,11 @@ choose_ip_version() {
     echo "3. 双栈 (IPv4 + IPv6)"
     echo "4. 使用当前配置 (IPv$IP_VERSION)"
     echo
-    
+
     while true; do
         read -p "请选择 IP 版本 (1-4): " -n 1 -r
         echo
-        
+
         case $REPLY in
             1)
                 IP_VERSION="4"
@@ -390,7 +259,7 @@ choose_ip_version() {
                 ;;
         esac
     done
-    
+
     # 显示选择结果
     echo
     case $IP_VERSION in
@@ -417,11 +286,11 @@ choose_ttl() {
     echo "5. 自定义"
     echo "6. 使用当前配置 ($TTL)"
     echo
-    
+
     while true; do
         read -p "请选择 TTL 值 (1-6): " -n 1 -r
         echo
-        
+
         case $REPLY in
             1)
                 TTL="5"
@@ -467,7 +336,7 @@ choose_ttl() {
                 ;;
         esac
     done
-    
+
     echo
     info "TTL 值说明："
     echo "  • TTL 值决定数据包在网络中的生存时间"
@@ -490,7 +359,7 @@ check_root() {
 detect_architecture() {
     local arch=$(uname -m)
     local os=$(uname -s | tr '[:upper:]' '[:lower:]')
-    
+
     case $arch in
         x86_64|amd64)
             arch="x86_64"
@@ -509,7 +378,7 @@ detect_architecture() {
             exit 1
             ;;
     esac
-    
+
     case $os in
         linux)
             os="linux"
@@ -522,7 +391,7 @@ detect_architecture() {
             exit 1
             ;;
     esac
-    
+
     echo "${os}-${arch}"
 }
 
@@ -531,7 +400,7 @@ get_download_url() {
     local platform=$(detect_architecture)
     local filename="fakehttp-${platform}.tar.gz"
     local base_url="https://github.com/${GITHUB_REPO}/releases/download/${VERSION}/${filename}"
-    
+
     # 根据下载方式返回不同的URL
     case "${DOWNLOAD_METHOD:-}" in
         "github-proxy")
@@ -547,13 +416,13 @@ get_download_url() {
 check_dependencies() {
     local deps=("curl" "tar" "systemctl")
     local missing=()
-    
+
     for dep in "${deps[@]}"; do
         if ! command -v "$dep" &> /dev/null; then
             missing+=("$dep")
         fi
     done
-    
+
     if [ ${#missing[@]} -ne 0 ]; then
         error "缺少依赖: ${missing[*]}"
         info "请安装缺少的依赖后重试"
@@ -564,7 +433,7 @@ check_dependencies() {
 # 检测是否需要代理
 detect_proxy_need() {
     info "检测网络环境..."
-    
+
     # 检查是否在中国大陆（通过检测能否访问GitHub）
     if curl -s --connect-timeout 5 https://api.github.com &> /dev/null; then
         info "直连 GitHub 正常，无需代理"
@@ -579,7 +448,7 @@ detect_proxy_need() {
 test_proxy() {
     local proxy_url="$1"
     info "测试代理: $proxy_url"
-    
+
     if curl -s --connect-timeout $PROXY_TIMEOUT --proxy "$proxy_url" https://api.github.com &> /dev/null; then
         success "代理连接测试成功"
         return 0
@@ -597,11 +466,11 @@ choose_download_method() {
     echo "3. 加速下载 (使用 GitHub 镜像代理)"
     echo "4. 退出安装"
     echo
-    
+
     while true; do
         read -p "请选择 (1-4): " -n 1 -r
         echo
-        
+
         case $REPLY in
             1)
                 info "选择直接下载"
@@ -644,14 +513,14 @@ choose_download_method() {
                 ;;
         esac
     done
-    
+
     success "已选择下载方式: $DOWNLOAD_METHOD"
 }
 
 # 检查网络连接
 check_network() {
     info "正在检测网络环境..."
-    
+
     # 检查环境变量中的代理设置
     local proxy_url=""
     if [[ -n "$HTTP_PROXY" ]]; then
@@ -663,7 +532,7 @@ check_network() {
     elif [[ -n "$https_proxy" ]]; then
         proxy_url="$https_proxy"
     fi
-    
+
     # 如果环境变量中有代理，询问是否使用
     if [[ -n "$proxy_url" ]]; then
         info "检测到环境变量代理: $proxy_url"
@@ -680,7 +549,7 @@ check_network() {
             fi
         fi
     fi
-    
+
     # 让用户选择下载方式
     choose_download_method
 }
@@ -691,7 +560,7 @@ stop_existing_service() {
         warn "停止现有的 $SERVICE_NAME 服务..."
         systemctl stop "$SERVICE_NAME"
     fi
-    
+
     if systemctl is-enabled --quiet "$SERVICE_NAME" 2>/dev/null; then
         warn "禁用 $SERVICE_NAME 服务..."
         systemctl disable "$SERVICE_NAME"
@@ -704,9 +573,9 @@ download_fakehttp() {
     local platform=$(detect_architecture)
     local temp_dir=$(mktemp -d)
     local filename="fakehttp-${platform}.tar.gz"
-    
+
     info "检测到系统架构: $platform"
-    
+
     # 检查是否已经安装了相同版本
     if [ -f "${INSTALL_DIR}/fakehttp" ]; then
         local current_version
@@ -721,7 +590,7 @@ download_fakehttp() {
             warn "无法获取当前版本信息，继续安装"
         fi
     fi
-    
+
     # 检查当前目录是否已有下载文件
     if [ -f "./${filename}" ]; then
         info "发现本地文件: ./${filename}"
@@ -743,11 +612,11 @@ download_fakehttp() {
             info "跳过本地文件，重新下载"
         fi
     fi
-    
+
     info "下载 FakeHTTP ${VERSION}..."
     local download_url=$(get_download_url)
     info "下载链接: $download_url"
-    
+
     # 根据下载方式显示不同信息
     case "$DOWNLOAD_METHOD" in
         "direct")
@@ -760,17 +629,17 @@ download_fakehttp() {
             info "使用 GitHub 镜像代理下载"
             ;;
     esac
-    
+
     # 构建curl命令
     local curl_cmd="curl -L --progress-bar --fail --connect-timeout 10 --max-time 300"
     if [[ "$DOWNLOAD_METHOD" == "http-proxy" && -n "$CURL_PROXY" ]]; then
         curl_cmd="$curl_cmd --proxy $CURL_PROXY"
     fi
-    
+
     # 下载文件
     if ! $curl_cmd -o "${temp_dir}/${filename}" "$download_url"; then
         error "下载失败: $download_url"
-        
+
         echo
         highlight "请选择操作："
         echo "1. 重新选择下载方式"
@@ -779,7 +648,7 @@ download_fakehttp() {
         echo
         read -p "请选择 (1-3): " -n 1 -r
         echo
-        
+
         case $REPLY in
             1)
                 info "重新选择下载方式..."
@@ -810,9 +679,9 @@ download_fakehttp() {
                 ;;
         esac
     fi
-    
+
     success "下载完成"
-    
+
     extract_and_install "$temp_dir" "$filename"
 }
 
@@ -820,10 +689,10 @@ download_fakehttp() {
 extract_and_install() {
     local temp_dir="$1"
     local filename="$2"
-    
+
     # 创建安装目录
     mkdir -p "$INSTALL_DIR"
-    
+
     # 解压文件到临时目录
     info "解压文件..."
     local extract_temp=$(mktemp -d)
@@ -832,7 +701,7 @@ extract_and_install() {
         rm -rf "$temp_dir" "$extract_temp"
         exit 1
     fi
-    
+
     # 查找 fakehttp 二进制文件
     local fakehttp_binary=$(find "$extract_temp" -name "fakehttp" -type f | head -1)
     if [ -z "$fakehttp_binary" ]; then
@@ -840,32 +709,32 @@ extract_and_install() {
         rm -rf "$temp_dir" "$extract_temp"
         exit 1
     fi
-    
+
     info "找到二进制文件: $fakehttp_binary"
     info "复制到安装目录: ${INSTALL_DIR}/fakehttp"
-    
+
     # 复制二进制文件到安装目录
     if ! cp "$fakehttp_binary" "${INSTALL_DIR}/fakehttp"; then
         error "复制文件失败"
         rm -rf "$temp_dir" "$extract_temp"
         exit 1
     fi
-    
+
     # 设置可执行权限
     chmod +x "${INSTALL_DIR}/fakehttp"
-    
+
     # 清理临时文件
     rm -rf "$temp_dir" "$extract_temp"
-    
+
     success "FakeHTTP 安装完成"
 }
 
 # 创建管理脚本
 create_manager_script() {
     local manager_script="${INSTALL_DIR}/fakehttp-manager.sh"
-    
+
     info "创建管理脚本..."
-    
+
     cat > "$manager_script" << EOF
 #!/bin/bash
 
@@ -920,7 +789,7 @@ check_binary() {
         error "FakeHTTP 二进制文件不存在: \$FAKEHTTP_BIN"
         exit 1
     fi
-    
+
     if [ ! -x "\$FAKEHTTP_BIN" ]; then
         error "FakeHTTP 二进制文件没有执行权限: \$FAKEHTTP_BIN"
         exit 1
@@ -963,7 +832,7 @@ build_command() {
     for host in "\${HOSTS[@]}"; do
         cmd_args="\$cmd_args -h \$host"
     done
-    
+
     # 添加 IP 版本参数
     case "\$IP_VERSION" in
         "4")
@@ -976,42 +845,42 @@ build_command() {
             cmd_args="\$cmd_args -4 -6"
             ;;
     esac
-    
+
     cmd_args="\$cmd_args -i \$INTERFACE -t \$TTL -d -s"
-    
+
     echo "\$FAKEHTTP_BIN \$cmd_args"
 }
 
 # 启动 fakehttp
 start_fakehttp() {
     log "正在检查 FakeHTTP 状态..."
-    
+
     if is_running; then
         warn "FakeHTTP 已经在运行中"
         show_status
         return 0
     fi
-    
+
     check_binary
     check_log_dir
-    
+
     # 显示配置信息
     show_config
-    
+
     # 构建并显示完整命令
     local full_command=\$(build_command)
     highlight "启动命令:"
     echo "  \$full_command"
     echo
-    
+
     log "正在启动 FakeHTTP (静默模式)..."
-    
+
     # 启动服务
     \$full_command
-    
+
     # 等待一会儿检查启动状态
     sleep 2
-    
+
     if is_running; then
         log "FakeHTTP 启动成功！"
         show_status
@@ -1027,29 +896,29 @@ start_fakehttp() {
 # 停止 fakehttp
 stop_fakehttp() {
     log "正在停止 FakeHTTP..."
-    
+
     if ! is_running; then
         warn "FakeHTTP 未在运行"
         return 0
     fi
-    
+
     check_binary
-    
+
     # 发送停止命令
     \$FAKEHTTP_BIN -k
-    
+
     # 等待进程结束
     local count=0
     while is_running && [ \$count -lt 10 ]; do
         sleep 1
         ((count++))
     done
-    
+
     if is_running; then
         error "FakeHTTP 停止失败，尝试强制终止..."
         pkill -f "fakehttp.*-d"
         sleep 2
-        
+
         if is_running; then
             error "无法停止 FakeHTTP 进程"
             exit 1
@@ -1074,12 +943,12 @@ show_status() {
     if is_running; then
         local pid=\$(pgrep -f "fakehttp.*-d")
         log "FakeHTTP 正在运行 (PID: \$pid)"
-        
+
         # 显示进程详细信息
         ps -p \$pid -o pid,ppid,user,cmd --no-headers 2>/dev/null | while read line; do
             info "进程信息: \$line"
         done
-        
+
         # 显示网络接口信息
         if command -v ip &> /dev/null; then
             local interface_info=\$(ip addr show "\$INTERFACE" 2>/dev/null | grep -E "inet [0-9]" | head -1 | awk '{print \$2}' | cut -d'/' -f1)
@@ -1091,13 +960,13 @@ show_status() {
         else
             info "网络接口: \$INTERFACE"
         fi
-        
+
         # 显示配置信息
         info "TTL 设置: \$TTL"
         info "IP 版本: IPv\$IP_VERSION"
         info "目标主机: \${HOSTS[*]}"
         info "运行模式: 静默模式 (无日志文件)"
-        
+
         # 显示完整命令
         local full_command=\$(build_command)
         info "运行命令: \$full_command"
@@ -1109,13 +978,13 @@ show_status() {
 # 查看日志
 view_logs() {
     local lines=\${1:-50}
-    
+
     if [ ! -f "\$LOG_FILE" ]; then
         warn "日志文件不存在: \$LOG_FILE"
         info "当前运行在静默模式，无日志文件"
         return 1
     fi
-    
+
     info "显示最近 \$lines 行日志:"
     echo "----------------------------------------"
     tail -n "\$lines" "\$LOG_FILE"
@@ -1128,7 +997,7 @@ tail_logs() {
         info "当前运行在静默模式，无日志文件"
         return 1
     fi
-    
+
     info "实时查看日志 (按 Ctrl+C 退出):"
     echo "----------------------------------------"
     tail -f "\$LOG_FILE"
@@ -1143,7 +1012,7 @@ FakeHTTP 管理脚本
 
 命令:
     start     启动 FakeHTTP 服务
-    stop      停止 FakeHTTP 服务  
+    stop      停止 FakeHTTP 服务
     restart   重启 FakeHTTP 服务
     status    显示服务状态
     config    显示配置信息
@@ -1222,7 +1091,7 @@ EOF
 # 创建 systemd 服务文件
 create_systemd_service() {
     info "创建 systemd 服务文件..."
-    
+
     cat > "$SERVICE_FILE" << EOF
 [Unit]
 Description=FakeHTTP Service
@@ -1260,13 +1129,13 @@ EOF
 enable_and_start_service() {
     info "重新加载 systemd 配置..."
     systemctl daemon-reload
-    
+
     info "启用 $SERVICE_NAME 服务..."
     systemctl enable "$SERVICE_NAME"
-    
+
     info "启动 $SERVICE_NAME 服务..."
     systemctl start "$SERVICE_NAME"
-    
+
     # 检查服务状态
     sleep 3
     if systemctl is-active --quiet "$SERVICE_NAME"; then
@@ -1283,29 +1152,29 @@ enable_and_start_service() {
 install_fakehttp() {
     highlight "=== FakeHTTP 安装程序 ==="
     echo
-    
+
     check_dependencies
-    
+
     # 网络接口选择
     info "配置网络接口..."
     choose_network_interface
-    
+
     # IP 版本选择
     info "配置 IP 版本..."
     choose_ip_version
-    
+
     # TTL 选择
     info "配置 TTL 值..."
     choose_ttl
-    
+
     check_network
     stop_existing_service
-    
+
     download_fakehttp
     create_manager_script
     create_systemd_service
     enable_and_start_service
-    
+
     echo
     success "FakeHTTP ${VERSION} 安装完成！"
     echo
@@ -1334,40 +1203,40 @@ install_fakehttp() {
 uninstall_fakehttp() {
     highlight "=== FakeHTTP 卸载程序 ==="
     echo
-    
+
     warn "即将卸载 FakeHTTP，这将删除所有相关文件"
     read -p "确定要继续吗？ (y/N): " -n 1 -r
     echo
-    
+
     if [[ ! $REPLY =~ ^[Yy]$ ]]; then
         info "取消卸载"
         exit 0
     fi
-    
+
     # 停止并禁用服务
     if systemctl is-active --quiet "$SERVICE_NAME" 2>/dev/null; then
         info "停止 $SERVICE_NAME 服务..."
         systemctl stop "$SERVICE_NAME"
     fi
-    
+
     if systemctl is-enabled --quiet "$SERVICE_NAME" 2>/dev/null; then
         info "禁用 $SERVICE_NAME 服务..."
         systemctl disable "$SERVICE_NAME"
     fi
-    
+
     # 删除服务文件
     if [ -f "$SERVICE_FILE" ]; then
         info "删除服务文件: $SERVICE_FILE"
         rm -f "$SERVICE_FILE"
         systemctl daemon-reload
     fi
-    
+
     # 删除安装目录
     if [ -d "$INSTALL_DIR" ]; then
         info "删除安装目录: $INSTALL_DIR"
         rm -rf "$INSTALL_DIR"
     fi
-    
+
     success "FakeHTTP 卸载完成！"
 }
 
@@ -1377,19 +1246,19 @@ show_version() {
         echo "已安装版本: ${VERSION}"
         echo "安装路径: ${INSTALL_DIR}"
         echo "架构: $(detect_architecture)"
-        
+
         # 显示配置信息
         echo "网络接口: ${INTERFACE}"
         echo "IP 版本: IPv${IP_VERSION}"
         echo "TTL 值: ${TTL}"
         echo "目标主机: ${HOSTS[*]}"
-        
+
         if systemctl is-active --quiet "$SERVICE_NAME" 2>/dev/null; then
             echo "服务状态: 运行中"
         else
             echo "服务状态: 已停止"
         fi
-        
+
         # 显示接口状态
         if command -v ip &> /dev/null; then
             local interface_info=$(ip addr show "$INTERFACE" 2>/dev/null | grep -E "inet [0-9]" | head -1 | awk '{print $2}' | cut -d'/' -f1)
@@ -1407,7 +1276,7 @@ show_version() {
 # 检查更新
 check_update() {
     info "检查 FakeHTTP 更新..."
-    
+
     # 这里可以添加检查最新版本的逻辑
     # 目前只显示当前配置的版本
     echo "当前配置版本: ${VERSION}"
@@ -1562,24 +1431,24 @@ retry_download() {
     local filename="$2"
     local max_retries=3
     local retry_count=0
-    
+
     while [ $retry_count -lt $max_retries ]; do
         info "尝试重新下载 (第 $((retry_count + 1)) 次)..."
-        
+
         # 重新选择下载方式
         choose_download_method
-        
+
         # 构建下载命令
         local download_url=$(get_download_url)
         local curl_cmd="curl -L --progress-bar --fail --connect-timeout 10 --max-time 300"
-        
+
         if [[ "$DOWNLOAD_METHOD" == "http-proxy" && -n "$CURL_PROXY" ]]; then
             curl_cmd="$curl_cmd --proxy $CURL_PROXY"
         fi
-        
+
         info "下载链接: $download_url"
         info "使用方式: $DOWNLOAD_METHOD"
-        
+
         # 尝试下载
         if $curl_cmd -o "${temp_dir}/${filename}" "$download_url"; then
             success "下载成功！"
@@ -1587,14 +1456,14 @@ retry_download() {
         else
             error "下载失败 (第 $((retry_count + 1)) 次尝试)"
             ((retry_count++))
-            
+
             if [ $retry_count -lt $max_retries ]; then
                 warn "将在 3 秒后重试..."
                 sleep 3
             fi
         fi
     done
-    
+
     error "已达到最大重试次数 ($max_retries)，下载失败"
     return 1
 }
