@@ -57,6 +57,7 @@ highlight() {
 # 网络配置
 INTERFACE="eno1-ovs"
 TTL="5"
+IP_VERSION="4"  # 4=IPv4, 6=IPv6, 46=双栈
 HOSTS=("www.speedtest.net" "speed.nuaa.edu.cn")
 
 # 网络接口检测函数
@@ -348,6 +349,132 @@ choose_network_interface() {
         info "重新选择接口..."
         choose_network_interface
     fi
+}
+
+# 选择 IP 版本
+choose_ip_version() {
+    highlight "请选择 IP 版本："
+    echo "1. IPv4 (推荐)"
+    echo "2. IPv6"
+    echo "3. 双栈 (IPv4 + IPv6)"
+    echo "4. 使用当前配置 (IPv$IP_VERSION)"
+    echo
+    
+    while true; do
+        read -p "请选择 IP 版本 (1-4): " -n 1 -r
+        echo
+        
+        case $REPLY in
+            1)
+                IP_VERSION="4"
+                success "已选择 IPv4"
+                break
+                ;;
+            2)
+                IP_VERSION="6"
+                success "已选择 IPv6"
+                break
+                ;;
+            3)
+                IP_VERSION="46"
+                success "已选择双栈 (IPv4 + IPv6)"
+                break
+                ;;
+            4)
+                info "保持当前配置: IPv$IP_VERSION"
+                break
+                ;;
+            *)
+                error "无效选择，请重新输入"
+                continue
+                ;;
+        esac
+    done
+    
+    # 显示选择结果
+    echo
+    case $IP_VERSION in
+        "4")
+            info "将使用 IPv4 (-4 参数)"
+            ;;
+        "6")
+            info "将使用 IPv6 (-6 参数)"
+            ;;
+        "46")
+            info "将使用双栈 (IPv4 + IPv6，-4 和 -6 参数)"
+            ;;
+    esac
+    echo
+}
+
+# 选择 TTL 值
+choose_ttl() {
+    highlight "请选择 TTL 值："
+    echo "1. 5  (默认值，推荐)"
+    echo "2. 10 (较高值)"
+    echo "3. 15 (高值)"
+    echo "4. 20 (更高值)"
+    echo "5. 自定义"
+    echo "6. 使用当前配置 ($TTL)"
+    echo
+    
+    while true; do
+        read -p "请选择 TTL 值 (1-6): " -n 1 -r
+        echo
+        
+        case $REPLY in
+            1)
+                TTL="5"
+                success "已选择 TTL: $TTL"
+                break
+                ;;
+            2)
+                TTL="10"
+                success "已选择 TTL: $TTL"
+                break
+                ;;
+            3)
+                TTL="15"
+                success "已选择 TTL: $TTL"
+                break
+                ;;
+            4)
+                TTL="20"
+                success "已选择 TTL: $TTL"
+                break
+                ;;
+            5)
+                while true; do
+                    read -p "请输入自定义 TTL 值 (1-255): " custom_ttl
+                    if [[ "$custom_ttl" =~ ^[0-9]+$ ]] && [[ $custom_ttl -ge 1 && $custom_ttl -le 255 ]]; then
+                        TTL="$custom_ttl"
+                        success "已设置自定义 TTL: $TTL"
+                        break
+                    else
+                        error "TTL 值必须是 1-255 之间的数字"
+                        continue
+                    fi
+                done
+                break
+                ;;
+            6)
+                info "保持当前配置: $TTL"
+                break
+                ;;
+            *)
+                error "无效选择，请重新输入"
+                continue
+                ;;
+        esac
+    done
+    
+    echo
+    info "TTL 值说明："
+    echo "  • TTL 值决定数据包在网络中的生存时间"
+    echo "  • 值越小，数据包传输距离越近"
+    echo "  • 通常 5-20 之间的值适用于大多数场景"
+    echo "  • 当前设置: $TTL"
+    echo
 }
 
 # 检查是否为 root 用户
@@ -749,6 +876,7 @@ create_manager_script() {
 FAKEHTTP_BIN="./fakehttp"
 INTERFACE="$INTERFACE"
 TTL="$TTL"
+IP_VERSION="$IP_VERSION"
 LOG_FILE="$LOG_FILE"
 HOSTS=($(printf '"%s" ' "${HOSTS[@]}"))
 
@@ -822,6 +950,7 @@ show_config() {
     echo "  二进制文件: \$FAKEHTTP_BIN"
     echo "  网络接口:   \$INTERFACE"
     echo "  TTL 值:     \$TTL"
+    echo "  IP 版本:    IPv\$IP_VERSION"
     echo "  日志文件:   \$LOG_FILE"
     echo "  目标主机:   \${HOSTS[*]}"
     echo "  运行模式:   静默模式 (-s 参数)"
@@ -834,6 +963,20 @@ build_command() {
     for host in "\${HOSTS[@]}"; do
         cmd_args="\$cmd_args -h \$host"
     done
+    
+    # 添加 IP 版本参数
+    case "\$IP_VERSION" in
+        "4")
+            cmd_args="\$cmd_args -4"
+            ;;
+        "6")
+            cmd_args="\$cmd_args -6"
+            ;;
+        "46")
+            cmd_args="\$cmd_args -4 -6"
+            ;;
+    esac
+    
     cmd_args="\$cmd_args -i \$INTERFACE -t \$TTL -d -s"
     
     echo "\$FAKEHTTP_BIN \$cmd_args"
@@ -951,6 +1094,7 @@ show_status() {
         
         # 显示配置信息
         info "TTL 设置: \$TTL"
+        info "IP 版本: IPv\$IP_VERSION"
         info "目标主机: \${HOSTS[*]}"
         info "运行模式: 静默模式 (无日志文件)"
         
@@ -1010,6 +1154,7 @@ FakeHTTP 管理脚本
 当前配置:
     接口:     \$INTERFACE
     TTL:      \$TTL
+    IP版本:   IPv\$IP_VERSION
     日志文件: \$LOG_FILE
     主机列表: \${HOSTS[*]}
     静默模式: 已启用 (-s 参数)
@@ -1145,6 +1290,14 @@ install_fakehttp() {
     info "配置网络接口..."
     choose_network_interface
     
+    # IP 版本选择
+    info "配置 IP 版本..."
+    choose_ip_version
+    
+    # TTL 选择
+    info "配置 TTL 值..."
+    choose_ttl
+    
     check_network
     stop_existing_service
     
@@ -1161,6 +1314,7 @@ install_fakehttp() {
     echo "  架构:       $(detect_architecture)"
     echo "  安装目录:   ${INSTALL_DIR}"
     echo "  网络接口:   ${INTERFACE}"
+    echo "  IP 版本:    IPv${IP_VERSION}"
     echo "  TTL 值:     ${TTL}"
     echo "  目标主机:   ${HOSTS[*]}"
     echo "  服务名称:   ${SERVICE_NAME}"
@@ -1226,6 +1380,7 @@ show_version() {
         
         # 显示配置信息
         echo "网络接口: ${INTERFACE}"
+        echo "IP 版本: IPv${IP_VERSION}"
         echo "TTL 值: ${TTL}"
         echo "目标主机: ${HOSTS[*]}"
         
@@ -1280,6 +1435,7 @@ FakeHTTP 安装和管理脚本
     服务名称:    ${SERVICE_NAME}
     日志文件:    ${LOG_FILE}
     网络接口:    ${INTERFACE}
+    IP 版本:     IPv${IP_VERSION}
     TTL:         ${TTL}
     目标主机:    ${HOSTS[*]}
 
@@ -1291,6 +1447,20 @@ FakeHTTP 安装和管理脚本
 支持的架构:
     linux-x86_64, linux-i386, linux-arm64, linux-arm
     darwin-x86_64, darwin-arm64
+
+IP 版本配置:
+    - 支持 IPv4、IPv6 和双栈模式
+    - IPv4 模式：使用 -4 参数，适合大多数环境
+    - IPv6 模式：使用 -6 参数，适合 IPv6 网络
+    - 双栈模式：同时使用 -4 和 -6 参数，支持 IPv4 和 IPv6
+    - 安装时可交互选择 IP 版本
+
+TTL 配置:
+    - 支持自定义 TTL 值 (1-255)
+    - 提供常用预设值：5、10、15、20
+    - TTL 值决定数据包在网络中的生存时间
+    - 值越小，数据包传输距离越近
+    - 建议范围：5-20 适用于大多数场景
 
 网络接口配置:
     - 安装时智能检测和推荐可用接口
@@ -1336,10 +1506,11 @@ FakeHTTP 安装和管理脚本
     ${INSTALL_DIR}/fakehttp-manager.sh status  # 详细状态
     ${INSTALL_DIR}/fakehttp-manager.sh config  # 查看配置
 
-接口管理:
-    重新安装时可重新选择网络接口
-    管理脚本显示当前接口状态和配置
-    支持查看接口IP地址和连通性
+配置管理:
+    - 重新安装时可重新选择网络接口、IP 版本和 TTL 值
+    - 管理脚本显示当前接口状态和完整配置
+    - 支持查看接口IP地址和连通性
+    - 配置修改后需重新安装服务
 
 EOF
 }
