@@ -783,12 +783,33 @@ menu_restart() { clear_screen; print_header; echo -e "${CYAN}【重启服务】$
 menu_log() {
   clear_screen
   print_header
-  echo -e "${CYAN}【运行日志】${NC} (最近 80 行)\n"
+  echo -e "${CYAN}【运行日志】${NC} (最近 80 行)
+"
   if [[ -f "$LOG_FILE" ]]; then
     tail -80 "$LOG_FILE" || true
     echo
     read -rp "实时查看？[y/N]: " realtime
-    [[ "${realtime:-N}" =~ ^[Yy]$ ]] && tail -f "$LOG_FILE"
+    if [[ "${realtime:-N}" =~ ^[Yy]$ ]]; then
+      echo -e "${YELLOW}实时查看中：按 Ctrl+C 退出并返回菜单${NC}
+"
+      # 将 tail 放入后台，Ctrl+C 只退出 tail，不中断整个脚本
+      local tpid interrupted old_trap
+      interrupted=0
+      old_trap="$(trap -p INT || true)"
+      set +e
+      tail -f "$LOG_FILE" &
+      tpid=$!
+      trap 'interrupted=1; kill "$tpid" 2>/dev/null' INT
+      wait "$tpid" 2>/dev/null
+      # 还原 INT trap
+      if [[ -n "$old_trap" ]]; then
+        eval "$old_trap"
+      else
+        trap - INT
+      fi
+      set -e
+      [[ "$interrupted" -eq 1 ]] && echo
+    fi
   else
     echo -e "${YELLOW}暂无日志${NC}"
   fi
@@ -802,7 +823,7 @@ menu_config() {
   echo "  1. 配置向导 (交互式)"
   echo "  2. 编辑配置文件"
   echo "  3. 查看当前配置"
-  echo "  0. 返回\n"
+  echo "  0. 返回"
   read -rp "选择: " choice
   case "$choice" in
     1) config_wizard; press_enter ;;
@@ -890,7 +911,8 @@ menu_service() {
   status="$(systemctl is-active "$SERVICE_NAME" 2>/dev/null || echo "inactive")"
   enabled="$(systemctl is-enabled "$SERVICE_NAME" 2>/dev/null || echo "disabled")"
   echo "服务状态: $status"
-  echo "开机启动: $enabled\n"
+  echo "开机启动: $enabled"
+  echo
   echo "  1. 启动服务"
   echo "  2. 停止服务"
   echo "  3. 重启服务"
@@ -898,7 +920,7 @@ menu_service() {
   echo "  5. 禁用开机启动"
   echo "  6. 查看服务状态"
   echo "  7. 重新生成服务文件"
-  echo "  0. 返回\n"
+  echo "  0. 返回"
   read -rp "选择: " choice
 
   case "$choice" in
@@ -933,7 +955,7 @@ main_menu() {
     echo "  7. systemd 服务"
     echo "  8. 安装/更新"
     echo "  9. 卸载"
-    echo "  0. 退出\n"
+    echo "  0. 退出"
     read -rp "选择: " choice
     case "$choice" in
       1) menu_status ;;
