@@ -18,6 +18,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCRIPT_NAME="$(basename "${BASH_SOURCE[0]}")"
 INSTALL_DIR="$SCRIPT_DIR"
 FAKEHTTP_BIN="${INSTALL_DIR}/fakehttp-bin"
+FAKEHTTP_BIN_ALT="${INSTALL_DIR}/fakehttp"
 CONFIG_FILE="${INSTALL_DIR}/config.conf"
 PID_FILE="${INSTALL_DIR}/.pid"
 LOG_FILE="${INSTALL_DIR}/fakehttp.log"
@@ -110,6 +111,22 @@ detect_architecture() {
     armv7l)         echo "linux-arm" ;;
     *)              echo "" ;;
   esac
+}
+
+get_fakehttp_bin() {
+  if [[ -x "$FAKEHTTP_BIN" ]]; then
+    echo "$FAKEHTTP_BIN"
+  elif [[ -x "$FAKEHTTP_BIN_ALT" ]]; then
+    echo "$FAKEHTTP_BIN_ALT"
+  else
+    echo "$FAKEHTTP_BIN"
+  fi
+}
+
+get_systemd_execstart() {
+  detect_systemd
+  [[ "$NO_SYSTEMD" == "true" ]] && return 1
+  systemctl cat "$SERVICE_NAME" 2>/dev/null | awk -F= '/^ExecStart=/{print $2; exit}'
 }
 
 # ============================================================================
@@ -286,8 +303,16 @@ ensure_queue_available() {
 # 进程管理
 # ============================================================================
 strict_pgrep() {
-  # 仅匹配以 fakehttp-bin 绝对路径开头的进程，避免误杀
-  pgrep -f -- "^${FAKEHTTP_BIN}([[:space:]]|$)" 2>/dev/null || true
+  # 仅匹配以 fakehttp 可执行绝对路径开头的进程，避免误杀
+  local -a patterns
+  patterns=(
+    "^${FAKEHTTP_BIN}([[:space:]]|$)"
+    "^${FAKEHTTP_BIN_ALT}([[:space:]]|$)"
+  )
+  local pat
+  for pat in "${patterns[@]}"; do
+    pgrep -f -- "$pat" 2>/dev/null || true
+  done | awk 'NF' | sort -u
 }
 
 is_running() {
@@ -308,9 +333,21 @@ get_pid() {
   strict_pgrep | head -1
 }
 
+systemd_execstart_matches() {
+  local execstart
+  execstart="$(get_systemd_execstart || true)"
+  [[ -z "${execstart:-}" ]] && return 1
+  [[ "$execstart" == *"/${SCRIPT_NAME} run"* ]] && return 0
+  [[ "$execstart" == *"${SCRIPT_NAME} run"* ]] && return 0
+  return 1
+}
+
 pre_start_cleanup() {
   # 尽量优雅释放 NFQUEUE
-  [[ -x "$FAKEHTTP_BIN" ]] && "$FAKEHTTP_BIN" -k >/dev/null 2>&1 || true
+  local bin
+  bin="$(get_fakehttp_bin)"
+  [[ -x "$bin" ]] && "$bin" -k >/dev/null 2>&1 || true
+  [[ -x "$FAKEHTTP_BIN_ALT" ]] && "$FAKEHTTP_BIN_ALT" -k >/dev/null 2>&1 || true
 
   # 如果还有残留进程，逐个 TERM -> KILL
   local pids
@@ -346,7 +383,7 @@ pre_start_cleanup() {
 # ============================================================================
 build_cmd_array() {
   local -a cmd
-  cmd=("$FAKEHTTP_BIN")
+  cmd=("$(get_fakehttp_bin)")
 
   # interface
   if [[ ${#INTERFACES[@]} -eq 0 ]]; then
@@ -391,6 +428,79 @@ build_cmd_array() {
   [[ "${RUN_DAEMON,,}" == "true" ]] && cmd+=("-d")
 
   CMD_ARRAY=("${cmd[@]}")
+}
+
+build_display_cmd() {
+  local -a cmd
+  local ttl_display
+  local bin_display
+  if [[ -x "$INSTALL_DIR/fakehttp" ]]; then
+    bin_display="./fakehttp"
+  elif [[ -x "$FAKEHTTP_BIN" ]]; then
+    bin_display="./$(basename "$FAKEHTTP_BIN")"
+  else
+    bin_display="$FAKEHTTP_BIN"
+  fi
+  cmd=("$bin_display")
+
+  if [[ ${#INTERFACES[@]} -eq 0 ]]; then
+    cmd+=("-a")
+  else
+    for i in "${INTERFACES[@]}"; do cmd+=("-i" "$i"); done
+  fi
+
+  for h in "${HOSTS[@]}"; do cmd+=("-h" "$h"); done
+  for e in "${EXCLUDES[@]}"; do cmd+=("-e" "$e"); done
+  for p in "${PAYLOADS[@]}"; do
+    [[ -n "${p:-}" ]] && cmd+=("-b" "$p")
+  done
+
+  case "$IP_VERSION" in
+    4)  cmd+=("-4") ;;
+    6)  cmd+=("-6") ;;
+    46) cmd+=("-4" "-6") ;;
+    *)  cmd+=("-4") ;;
+  esac
+
+  ttl_display="$TTL"
+  [[ "$ttl_display" =~ ^[0-9]+$ ]] || ttl_display="5"
+  cmd+=("-t" "$ttl_display")
+
+  cmd+=("-n" "$QUEUE_NUM")
+  cmd+=("-w" "$LOG_FILE")
+
+  [[ "${SILENT,,}" == "true" ]] && cmd+=("-s")
+  [[ "${RUN_DAEMON,,}" == "true" ]] && cmd+=("-d")
+
+  printf '%q ' "${cmd[@]}"
+  echo
+}
+
+get_running_cmdline() {
+  local pid
+  local -a args=()
+  pid="$(get_pid || true)"
+  [[ -n "${pid:-}" ]] || return 1
+  [[ -r "/proc/$pid/cmdline" ]] || return 1
+
+  while IFS= read -r -d '' arg; do
+    args+=("$arg")
+  done < "/proc/$pid/cmdline"
+
+  [[ ${#args[@]} -gt 0 ]] || return 1
+  if [[ "${args[0]}" == "$INSTALL_DIR/"* ]]; then
+    args[0]="./$(basename "${args[0]}")"
+  fi
+
+  printf '%q ' "${args[@]}"
+  echo
+}
+
+print_running_cmd() {
+  if is_running; then
+    get_running_cmdline && return 0
+  fi
+  build_display_cmd
 }
 
 # ============================================================================
@@ -439,12 +549,13 @@ do_start() {
     echo -e "${RED}启动失败（daemon 模式未检测到进程），查看日志: $LOG_FILE${NC}"
     return 1
   else
-    # 脚本托管后台
-    (cd "$INSTALL_DIR" && nohup "${CMD_ARRAY[@]}" >>"$LOG_FILE" 2>&1 & echo $! > "$PID_FILE")
+    # 脚本托管后台 - 使用 setsid 创建独立会话，隔离信号（防止 Ctrl+C 传播）
+    (cd "$INSTALL_DIR" && setsid nohup "${CMD_ARRAY[@]}" >>"$LOG_FILE" 2>&1 &)
     sleep 1
     local pid
-    pid="$(get_pid || true)"
+    pid="$(strict_pgrep | head -1 || true)"
     if [[ -n "${pid:-}" ]] && kill -0 "$pid" 2>/dev/null; then
+      echo "$pid" > "$PID_FILE"
       echo -e "${GREEN}启动成功 (PID: $pid)${NC}"
       return 0
     fi
@@ -753,13 +864,34 @@ menu_status() {
   clear_screen
   print_header
   load_config 2>/dev/null || true
+  detect_systemd
 
   echo -e "${CYAN}【状态信息】${NC}\n"
   print_status
   echo
   echo "安装目录: $INSTALL_DIR"
-  echo "二进制:   $([[ -x "$FAKEHTTP_BIN" ]] && echo -e "${GREEN}已安装${NC}" || echo -e "${RED}未安装${NC}")"
+  local bin_main bin_alt
+  bin_main="$([[ -x "$FAKEHTTP_BIN" ]] && echo -e "${GREEN}fakehttp-bin${NC}" || echo -e "${RED}fakehttp-bin(缺失)${NC}")"
+  bin_alt="$([[ -x "$FAKEHTTP_BIN_ALT" ]] && echo -e "${GREEN}fakehttp${NC}" || echo -e "${YELLOW}fakehttp(缺失)${NC}")"
+  echo "二进制:   ${bin_main}  ${bin_alt}"
+  echo "使用:     $(basename "$(get_fakehttp_bin)")"
   echo "配置文件: $([[ -f "$CONFIG_FILE" ]] && echo -e "${GREEN}存在${NC}" || echo -e "${YELLOW}不存在${NC}")"
+  if [[ "$NO_SYSTEMD" == "true" ]]; then
+    echo "systemd:   不可用"
+  elif systemctl cat "$SERVICE_NAME" &>/dev/null; then
+    local s_active s_enabled s_exec
+    s_active="$(systemctl is-active "$SERVICE_NAME" 2>/dev/null || echo "inactive")"
+    s_enabled="$(systemctl is-enabled "$SERVICE_NAME" 2>/dev/null || echo "disabled")"
+    echo "systemd:   $s_active / $s_enabled"
+    s_exec="$(get_systemd_execstart || true)"
+    [[ -n "${s_exec:-}" ]] && echo "ExecStart: $s_exec"
+    if ! systemd_execstart_matches; then
+      echo -e "${YELLOW}提示: ExecStart 不是 ${SCRIPT_NAME} run，启动参数可能与配置不一致${NC}"
+    fi
+  else
+    echo "systemd:   未安装服务"
+  fi
+
   echo
   echo -e "${CYAN}【当前配置】${NC}\n"
   echo "接口 -i:     ${INTERFACES[*]:-(所有 -a)}"
@@ -772,6 +904,18 @@ menu_status() {
   echo "AUTO_FIX:    $AUTO_FIX_QUEUE"
   echo "RUN_DAEMON:  $RUN_DAEMON"
   echo "SILENT:      $SILENT"
+
+  echo
+  echo -e "${CYAN}【当前运行命令】${NC}\n"
+  if is_running; then
+    get_running_cmdline || echo "(无法读取)"
+  else
+    echo "(未运行)"
+  fi
+
+  echo
+  echo -e "${CYAN}【建议启动命令】${NC}\n"
+  build_display_cmd
 
   press_enter
 }
